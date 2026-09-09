@@ -16,11 +16,12 @@ import {
 } from "./_common.js";
 import { getData } from "./_data.js";
 
-interface PageQueryParam {
-  offset: number;
-  limit: number;
-  expand?: boolean;
-}
+import {
+  buildPageEtag,
+  isValidPageQuery,
+  parsePageQuery,
+  type PageQueryParam,
+} from "../../shared/cache.js";
 
 interface ShardIdIndex {
   by_id: Record<string, string>;
@@ -30,14 +31,6 @@ interface ShardIdIndex {
 interface ShardNameIndex {
   by_name: Record<string, number[]>;
   // resource_hash: string;
-}
-
-function buildPageEtag(
-  resourceHash: string,
-  pageParam: PageQueryParam,
-): string {
-  const expandSuffix = pageParam.expand ? "-expanded" : "";
-  return `${resourceHash}-${pageParam.offset}-${pageParam.limit}${expandSuffix}`;
 }
 
 function getSortedIdKeys(byId: Record<string, string>): string[] {
@@ -89,7 +82,7 @@ async function fetchShardRecord(
     { type: "json" },
   );
   if (!data) {
-    throw new Error(`Data not found: ${resourceName}/${id}`);
+    throw new Error(`未找到数据: ${resourceName}/${id}`);
   }
   return data[id];
 }
@@ -119,7 +112,7 @@ async function loadShardsByFilenames(
         { type: "json" },
       );
       if (!data) {
-        throw new Error(`Data not found: ${resourceName}/${shardFilename}`);
+        throw new Error(`未找到数据: ${resourceName}/${shardFilename}`);
       }
       return [shardFilename, data] as const;
     }),
@@ -175,14 +168,6 @@ async function fetchShardRecordsByIds(
     results.push(shardCache.get(shardFilename)![id]);
   }
   return results;
-}
-
-function parseExpandQueryParam(queryParams: URLSearchParams): boolean {
-  if (!queryParams.has("expand")) {
-    return false;
-  }
-  const value = queryParams.get("expand");
-  return value === null || value === "" || value === "true" || value === "1";
 }
 
 function buildPageUrl(
@@ -270,26 +255,26 @@ function buildLinkHeader(
     links.push(`<${schemaUrl.toString()}>; rel="describedby"`);
   }
 
-  // Next 链接
+  // 下一页链接
   const nextPage = getNextPage(pageParam, count);
   if (nextPage) {
     const nextUrl = buildPageUrl(url, nextPage);
     if (nextUrl) links.push(`<${nextUrl}>; rel="next"`);
   }
 
-  // Previous 链接
+  // 上一页链接
   const prevPage = getPreviousPage(pageParam);
   if (prevPage) {
     const prevUrl = buildPageUrl(url, prevPage);
     if (prevUrl) links.push(`<${prevUrl}>; rel="prev"`);
   }
 
-  // First 链接
+  // 第一页链接
   const firstPage = getFirstPage(pageParam);
   const firstUrl = buildPageUrl(url, firstPage);
   if (firstUrl) links.push(`<${firstUrl}>; rel="first"`);
 
-  // Last 链接
+  // 最后一页链接
   const lastPage = getLastPage(pageParam, count);
   const lastUrl = buildPageUrl(url, lastPage);
   if (lastUrl) links.push(`<${lastUrl}>; rel="last"`);
@@ -303,6 +288,7 @@ async function handleDataRequest(
   queryParams: URLSearchParams = new URLSearchParams(),
 ): Promise<Response> {
   const gzip = true;
+  if (path.length > 2) return createNotFoundResponse();
   const [resource_name, name] = path;
   if (!resource_name) {
     const raw = await getData(`sharded_data/index.json`, { type: "text" });
@@ -315,16 +301,17 @@ async function handleDataRequest(
 
   // 如果没有二级路径，则查找一级路径是资源名称还是文件名称，
   if (!name) {
-    const pageParam = {
-      offset: parseInt(queryParams.get("offset") || "0") || 0,
-      limit: parseInt(queryParams.get("limit") || "20") || 20,
-      expand: parseExpandQueryParam(queryParams),
-    };
-    if (pageParam.limit > 200) {
-      return new Response(JSON.stringify({ error: "Limit is too large" }), {
-        status: 400,
-        headers: RESPONSE_HEADERS,
-      });
+    const pageParam = parsePageQuery(queryParams);
+    if (!isValidPageQuery(pageParam)) {
+      return new Response(
+        JSON.stringify({
+          error: pageParam.limit > 200 ? "limit 参数过大" : "分页参数无效",
+        }),
+        {
+          status: 400,
+          headers: RESPONSE_HEADERS,
+        },
+      );
     }
 
     // 快速路径：仅读取 resource.hash 即可完成条件请求，跳过 id-index.json
@@ -414,27 +401,18 @@ async function handleDataRequest(
   }
 
   const resourceHash = await tryGetResourceHash(resource_name);
-  if (resourceHash) {
-    const earlyResponse = tryNotModifiedResponse(requestEtag, resourceHash);
-    if (earlyResponse) {
-      return earlyResponse;
-    }
-  }
-
   const idIndex = await getShardIdIndex(resource_name);
   if (!idIndex) {
     return createNotFoundResponse();
   }
 
   const hash = resourceHash ?? idIndex.resource_hash;
-  if (!resourceHash) {
-    const notModified = tryNotModifiedResponse(requestEtag, hash);
-    if (notModified) {
-      return notModified;
-    }
-  }
 
   if (stringIsInteger(name)) {
+    // 匹配的资源 hash 不能把不存在的记录变成 304。
+    if (!Object.hasOwn(idIndex.by_id, name)) return createNotFoundResponse();
+    const notModified = tryNotModifiedResponse(requestEtag, hash);
+    if (notModified) return notModified;
     const record = await fetchShardRecordById(resource_name, name, idIndex);
     if (record === null) {
       return createNotFoundResponse();
@@ -454,9 +432,11 @@ async function handleDataRequest(
   }
 
   const nameIndex = await getShardNameIndex(resource_name);
-  if (!nameIndex) {
+  if (!nameIndex || !Object.hasOwn(nameIndex.by_name, name)) {
     return createNotFoundResponse();
   }
+  const notModified = tryNotModifiedResponse(requestEtag, hash);
+  if (notModified) return notModified;
 
   const result = await fetchShardRecordsByName(
     resource_name,
@@ -487,7 +467,7 @@ async function handleDataRequest(
  */
 export async function onRequestGet(context: EventContext): Promise<Response> {
   if (!API_BASE_URL) {
-    return new Response(JSON.stringify({ error: "API_BASE_URL is not set" }), {
+    return new Response(JSON.stringify({ error: "API_BASE_URL 未设置" }), {
       status: 500,
       headers: RESPONSE_HEADERS,
     });

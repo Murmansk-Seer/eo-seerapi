@@ -1,8 +1,10 @@
-/**
- * EdgeOne 回源到 Cloud Function 时会剥离 If-None-Match，
- * 在边缘中间件将其复制到 X-If-None-Match 再转发，供条件缓存使用。
- */
-const ETAG_FALLBACK_HEADER = "x-if-none-match";
+import { cacheManifest } from "./generated/cache-manifest.js";
+import {
+  createNotModifiedResponse,
+  ETAG_FALLBACK_HEADER,
+  etagMatches,
+  getManifestEtag,
+} from "./shared/cache.js";
 
 interface MiddlewareContext {
   request: Request;
@@ -15,6 +17,17 @@ export function middleware(context: MiddlewareContext): Response {
     return context.next();
   }
 
+  if (context.request.method === "GET") {
+    const etag = getManifestEtag(new URL(context.request.url), cacheManifest);
+    if (etag && etagMatches(ifNoneMatch, etag)) {
+      const response = createNotModifiedResponse(etag);
+      response.headers.set("X-SeerAPI-Cache", "middleware-304");
+      return response;
+    }
+  }
+
+  // 保留现有回退逻辑，因为 EdgeOne 可能会在请求到达云函数之前
+  // 移除 If-None-Match 头。
   return context.next({
     headers: {
       [ETAG_FALLBACK_HEADER]: ifNoneMatch,

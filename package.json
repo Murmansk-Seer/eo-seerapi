@@ -6,11 +6,16 @@
   "author": "Nattsu39",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --import tsx --test tests/cache.test.ts",
+    "generate:cache": "node scripts/build_cache_manifest.js",
+    "postgenerate:cache": "node scripts/check_middleware_bundle.js",
+    "prebuild": "npm run generate:cache",
     "build": "node scripts/build_api_reference.js"
   },
   "devDependencies": {
-    "@types/node": "^24"
+    "@types/node": "^24",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.13"
   },
   "dependencies": {
     "edgeone": "^1.6.14"
