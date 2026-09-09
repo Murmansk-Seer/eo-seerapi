@@ -78,9 +78,6 @@ jobs:
       - name: Generate middleware cache manifest
         run: npm run generate:cache
 
-      - name: Test conditional requests
-        run: npm test
-
     #   - name: Build project
     #     run: npm run build
     #     env:

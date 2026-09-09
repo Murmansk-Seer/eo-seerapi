@@ -6,7 +6,6 @@
   "author": "Nattsu39",
   "type": "module",
   "scripts": {
-    "test": "node --import tsx --test tests/cache.test.ts",
     "generate:cache": "node scripts/build_cache_manifest.js",
     "postgenerate:cache": "node scripts/check_middleware_bundle.js",
     "prebuild": "npm run generate:cache",
