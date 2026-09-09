@@ -66,7 +66,7 @@ export async function generateCacheManifest({
         throw new Error(`${resource}/${name}: name 索引引用无效`);
       }
     }
-    manifest[resource] = { hash, ids, names };
+    manifest[resource] = { hash, ids, names, hasNameIndex: nameText !== null };
   }
   // 输出与 JS 兼容的 TypeScript 模块，而不是运行时 JSON 文件导入。
   // JSON.parse 也会把 __proto__ 等键保留为普通自有键。

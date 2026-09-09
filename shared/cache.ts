@@ -6,6 +6,22 @@ export interface PageQueryParam {
   expand?: boolean;
 }
 
+export function normalizeName(name: string): string {
+  return name.trim().normalize("NFKC").toLowerCase();
+}
+
+export function parseNameQuery(query: URLSearchParams): {
+  name: string | null;
+  valid: boolean;
+} {
+  const raw = query.get("name");
+  return {
+    name: raw === null ? null : normalizeName(raw) || null,
+    // 按用户输入的 Unicode 码点计数，在规范化之前限制长度。
+    valid: raw === null || [...raw].length <= 64,
+  };
+}
+
 export function parsePageQuery(query: URLSearchParams): PageQueryParam {
   const expand = query.get("expand");
   return {
@@ -18,8 +34,13 @@ export function parsePageQuery(query: URLSearchParams): PageQueryParam {
   };
 }
 
-export function buildPageEtag(hash: string, page: PageQueryParam): string {
-  return `${hash}-${page.offset}-${page.limit}${page.expand ? "-expanded" : ""}`;
+export function buildPageEtag(
+  hash: string,
+  page: PageQueryParam,
+  name: string | null = null,
+): string {
+  const filter = name === null ? "" : `-name-${new URLSearchParams({ name })}`;
+  return `${hash}-${page.offset}-${page.limit}${page.expand ? "-expanded" : ""}${filter}`;
 }
 
 export function isValidPageQuery(page: PageQueryParam): boolean {
@@ -67,6 +88,7 @@ export interface ResourceVersion {
   // 有序的精确键集合，而不是分片文件名或记录内容。
   ids: string[];
   names: string[];
+  hasNameIndex?: boolean;
 }
 
 export type CacheManifest = Record<string, ResourceVersion>;
@@ -111,9 +133,12 @@ export function getManifestEtag(
   if (!Object.hasOwn(manifest, resource)) return null;
   const entry = manifest[resource]!;
   if (name === undefined) {
+    const filter = parseNameQuery(url.searchParams);
+    if (!filter.valid || (filter.name !== null && entry.hasNameIndex !== true))
+      return null;
     const page = parsePageQuery(url.searchParams);
     if (!isValidPageQuery(page)) return null;
-    return buildPageEtag(entry.hash, page);
+    return buildPageEtag(entry.hash, page, filter.name);
   }
   return contains(/^\d+$/.test(name) ? entry.ids : entry.names, name)
     ? entry.hash

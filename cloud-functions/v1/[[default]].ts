@@ -20,6 +20,8 @@ import {
   buildPageEtag,
   isValidPageQuery,
   parsePageQuery,
+  parseNameQuery,
+  normalizeName,
   type PageQueryParam,
 } from "../../shared/cache.js";
 
@@ -290,6 +292,7 @@ async function handleDataRequest(
   const gzip = true;
   if (path.length > 2) return createNotFoundResponse();
   const [resource_name, name] = path;
+  // name 查询参数只筛选资源列表，路径详情保持原有行为。
   if (!resource_name) {
     const raw = await getData(`sharded_data/index.json`, { type: "text" });
     if (!raw) {
@@ -301,6 +304,17 @@ async function handleDataRequest(
 
   // 如果没有二级路径，则查找一级路径是资源名称还是文件名称，
   if (!name) {
+    const nameQuery = parseNameQuery(queryParams);
+    if (!nameQuery.valid) {
+      return new Response(
+        JSON.stringify({ error: "name 长度不能超过 64 个字符" }),
+        {
+          status: 400,
+          headers: RESPONSE_HEADERS,
+        },
+      );
+    }
+    const queryName = nameQuery.name;
     const pageParam = parsePageQuery(queryParams);
     if (!isValidPageQuery(pageParam)) {
       return new Response(
@@ -316,7 +330,7 @@ async function handleDataRequest(
 
     // 快速路径：仅读取 resource.hash 即可完成条件请求，跳过 id-index.json
     const resourceHash = await tryGetResourceHash(resource_name);
-    if (resourceHash) {
+    if (resourceHash && queryName === null) {
       const earlyResponse = tryNotModifiedResponse(
         requestEtag,
         buildPageEtag(resourceHash, pageParam),
@@ -335,6 +349,12 @@ async function handleDataRequest(
       if (!raw) {
         return createNotFoundResponse();
       }
+      if (queryName !== null) {
+        return new Response(JSON.stringify({ error: "该资源不支持名称查询" }), {
+          status: 400,
+          headers: RESPONSE_HEADERS,
+        });
+      }
       const schemaUrl = buildUrl(API_BASE_URL, ["schemas", resource_name]);
       return createRawJsonResponse(
         raw,
@@ -348,11 +368,19 @@ async function handleDataRequest(
       );
     }
 
+    const nameIndex =
+      queryName === null ? null : await getShardNameIndex(resource_name);
+    if (queryName !== null && !nameIndex) {
+      return new Response(JSON.stringify({ error: "该资源不支持名称查询" }), {
+        status: 400,
+        headers: RESPONSE_HEADERS,
+      });
+    }
     const hash = resourceHash ?? idIndex.resource_hash;
-    if (!resourceHash) {
+    if (!resourceHash || queryName !== null) {
       const notModified = tryNotModifiedResponse(
         requestEtag,
-        buildPageEtag(hash, pageParam),
+        buildPageEtag(hash, pageParam, queryName),
       );
       if (notModified) {
         return notModified;
@@ -360,7 +388,21 @@ async function handleDataRequest(
     }
 
     const url = buildUrl(API_BASE_URL, [resource_name]);
-    const idKeys = getSortedIdKeys(idIndex.by_id);
+    let idKeys = getSortedIdKeys(idIndex.by_id);
+    if (queryName !== null) {
+      url.searchParams.set("name", queryName);
+      const matchingIds = new Set<string>();
+      if (nameIndex) {
+        for (const [indexedName, ids] of Object.entries(nameIndex.by_name)) {
+          if (normalizeName(indexedName).includes(queryName)) {
+            for (const id of ids) matchingIds.add(String(id));
+          }
+        }
+      }
+      idKeys = idKeys
+        .filter((id) => matchingIds.has(id))
+        .sort((a, b) => Number(a) - Number(b));
+    }
     const count = idKeys.length;
 
     const nextUrl = buildPageUrl(url, getNextPage(pageParam, count));
@@ -377,7 +419,7 @@ async function handleDataRequest(
           id: parseInt(idStr),
           url: buildUrl(API_BASE_URL, [resource_name, idStr]).toString(),
         }));
-    const pageEtag = buildPageEtag(hash, pageParam);
+    const pageEtag = buildPageEtag(hash, pageParam, queryName);
     const schemaUrl = buildUrl(API_BASE_URL, ["schemas", resource_name]);
     return createSuccessResponse(
       {
@@ -393,7 +435,7 @@ async function handleDataRequest(
       "OK",
       {
         ETag: formatEtag(pageEtag),
-        Link: buildLinkHeader(API_BASE_URL, pageParam, count, schemaUrl),
+        Link: buildLinkHeader(url.toString(), pageParam, count, schemaUrl),
         "Content-Type": "application/schema-instance+json",
       },
       { gzip },
