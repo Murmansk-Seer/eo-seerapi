@@ -1,4 +1,11 @@
 import { gzipSync } from "zlib";
+import { ETAG_FALLBACK_HEADER } from "../../shared/cache.js";
+export {
+  createNotModifiedResponse,
+  etagMatches,
+  formatEtag,
+  normalizeEtag,
+} from "../../shared/cache.js";
 
 export const API_BASE_URL = env.API_BASE_URL!;
 
@@ -47,9 +54,6 @@ function getRequestHeader(
   return "";
 }
 
-/** EdgeOne 回源时会剥离 If-None-Match，由 middleware 复制到此头透传 */
-const ETAG_FALLBACK_HEADER = "x-if-none-match";
-
 /**
  * 从请求头中提取 If-None-Match（含 middleware 透传的 X-If-None-Match）
  */
@@ -58,37 +62,6 @@ export function getEtagFromRequest(request: EdgeOneRequest): string {
     getRequestHeader(request.headers, "if-none-match") ||
     getRequestHeader(request.headers, ETAG_FALLBACK_HEADER)
   );
-}
-
-/**
- * 格式化为 HTTP 强 ETag（带引号）
- */
-export function formatEtag(value: string): string {
-  const normalized = normalizeEtag(value);
-  return `"${normalized}"`;
-}
-
-/**
- * 规范化 ETag 值以便比较（去除 W/ 前缀与引号）
- */
-export function normalizeEtag(etag: string): string {
-  return etag.trim().replace(/^W\//, "").replace(/^"/, "").replace(/"$/, "");
-}
-
-/**
- * 判断 If-None-Match 是否与当前 ETag 匹配
- */
-export function etagMatches(ifNoneMatch: string, etag: string): boolean {
-  if (!ifNoneMatch || !etag) {
-    return false;
-  }
-  if (ifNoneMatch.trim() === "*") {
-    return true;
-  }
-  const normalized = normalizeEtag(etag);
-  return ifNoneMatch
-    .split(",")
-    .some((tag) => normalizeEtag(tag) === normalized);
 }
 
 /**
@@ -203,20 +176,6 @@ export function createRawJsonResponse(
     additionalHeaders,
     options,
   );
-}
-
-/**
- * 创建 304 响应
- */
-export function createNotModifiedResponse(etag?: string): Response {
-  const headers: Record<string, string> = { ...RESPONSE_HEADERS };
-  if (etag) {
-    headers["ETag"] = formatEtag(etag);
-  }
-  return new Response(null, {
-    status: 304,
-    headers,
-  });
 }
 
 export function buildUrl(baseUrl: string | URL, path: string[] = []): URL {
